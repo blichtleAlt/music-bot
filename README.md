@@ -74,7 +74,7 @@ Save and load your favorite radio tunings.
 
 1. Install dependencies:
    ```bash
-   pip install discord.py python-dotenv yt-dlp aiohttp
+   pip install -r requirements.txt
    ```
 
 2. Install FFmpeg (required for audio playback)
@@ -96,6 +96,6 @@ Save and load your favorite radio tunings.
 - **aiohttp** - ESPN API requests
 
 ## Architecture
-- `bot.py` - Main bot setup, message cleanup system
-- `music.py` - Music cog with playback and autoplay
+- `bot.py` - Main bot setup, message cleanup system, cog loader
+- `music.py` - Music cog with playback, autoplay, radio mode, and station presets
 - `sports.py` - Sports cog with ESPN score fetching
