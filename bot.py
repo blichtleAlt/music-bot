@@ -5,6 +5,8 @@ import os
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 load_dotenv()
 
@@ -123,6 +125,45 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 COGS = ["music", "sports"]
 
 
+class CogReloader(FileSystemEventHandler):
+    """Watches for file changes and reloads cogs automatically."""
+
+    def __init__(self, bot: commands.Bot, loop: asyncio.AbstractEventLoop):
+        self.bot = bot
+        self.loop = loop
+        self._debounce: dict[str, float] = {}
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        if not event.src_path.endswith(".py"):
+            return
+
+        # Get cog name from filename
+        filename = os.path.basename(event.src_path)
+        cog_name = filename[:-3]  # Remove .py
+
+        if cog_name not in COGS:
+            return
+
+        # Debounce - ignore if modified within last 1 second
+        import time
+        now = time.time()
+        if cog_name in self._debounce and now - self._debounce[cog_name] < 1:
+            return
+        self._debounce[cog_name] = now
+
+        logger.info(f"Detected change in {filename}, reloading {cog_name}...")
+        asyncio.run_coroutine_threadsafe(self._reload_cog(cog_name), self.loop)
+
+    async def _reload_cog(self, cog_name: str):
+        try:
+            await self.bot.reload_extension(cog_name)
+            logger.info(f"Reloaded cog: {cog_name}")
+        except Exception as e:
+            logger.error(f"Failed to reload {cog_name}: {e}")
+
+
 @bot.event
 async def on_ready():
     logger.info(f"Bot is ready! Logged in as {bot.user}")
@@ -193,9 +234,21 @@ async def main():
         print("Error: DISCORD_TOKEN not set in .env file")
         exit(1)
 
-    async with bot:
-        await load_cogs()
-        await bot.start(token)
+    # Set up file watcher for auto-reload
+    loop = asyncio.get_event_loop()
+    event_handler = CogReloader(bot, loop)
+    observer = Observer()
+    observer.schedule(event_handler, path=".", recursive=False)
+    observer.start()
+    logger.info("File watcher started - cogs will auto-reload on save")
+
+    try:
+        async with bot:
+            await load_cogs()
+            await bot.start(token)
+    finally:
+        observer.stop()
+        observer.join()
 
 
 if __name__ == "__main__":

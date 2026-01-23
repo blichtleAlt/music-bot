@@ -4,10 +4,12 @@ import logging
 import os
 import random
 import re
+import tempfile
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import discord
+import edge_tts
 from discord import ui
 from discord.ext import commands
 import yt_dlp
@@ -73,6 +75,62 @@ NON_SONG_PATTERNS = [
 # Reasonable song duration range (in seconds)
 MIN_SONG_DURATION = 90  # 1.5 minutes
 MAX_SONG_DURATION = 480  # 8 minutes
+
+# TTS voices for announcements (randomly selected each time)
+TTS_VOICES = [
+    # American English
+    "en-US-GuyNeural",
+    "en-US-JennyNeural",
+    "en-US-AriaNeural",
+    "en-US-DavisNeural",
+    "en-US-TonyNeural",
+    "en-US-SaraNeural",
+    "en-US-NancyNeural",
+    "en-US-JasonNeural",
+    # British English
+    "en-GB-RyanNeural",
+    "en-GB-SoniaNeural",
+    "en-GB-ThomasNeural",
+    "en-GB-LibbyNeural",
+    # Australian English
+    "en-AU-WilliamNeural",
+    "en-AU-NatashaNeural",
+    # Other English accents
+    "en-IN-PrabhatNeural",      # Indian
+    "en-IN-NeerjaNeural",
+    "en-IE-ConnorNeural",       # Irish
+    "en-IE-EmilyNeural",
+    "en-ZA-LeahNeural",         # South African
+    "en-ZA-LukeNeural",
+    "en-NZ-MitchellNeural",     # New Zealand
+    "en-NZ-MollyNeural",
+    "en-SG-WayneNeural",        # Singaporean
+    "en-KE-AsiliaNeural",       # Kenyan
+    "en-KE-ChilembaNeural",
+    "en-PH-JamesNeural",        # Filipino
+    "en-CA-LiamNeural",         # Canadian
+    "en-CA-ClaraNeural",
+    "en-HK-YanNeural",          # Hong Kong
+    # Spanish
+    "es-MX-JorgeNeural",        # Mexican
+    "es-MX-DaliaNeural",
+    "es-ES-AlvaroNeural",       # Spain
+    "es-ES-ElviraNeural",
+    "es-AR-TomasNeural",        # Argentine
+    "es-AR-ElenaNeural",
+    "es-CO-GonzaloNeural",      # Colombian
+    "es-CO-SalomeNeural",
+    "es-CL-CatalinaNeural",     # Chilean
+    "es-CL-LorenzoNeural",
+    "es-PE-CamilaNeural",       # Peruvian
+    "es-PE-AlexNeural",
+    "es-VE-PaolaNeural",        # Venezuelan
+    "es-VE-SebastianNeural",
+    "es-CU-BelkysNeural",       # Cuban
+    "es-CU-ManuelNeural",
+    "es-PR-KarinaNeural",       # Puerto Rican
+    "es-PR-VictorNeural",
+]
 
 
 def is_likely_song(title: str, duration: int = 0) -> bool:
@@ -200,6 +258,8 @@ class Music(commands.Cog):
         # Radio state per guild
         # Structure: {guild_id: {"description": str, "energy": int, "played_titles": set, "avoided_titles": set, "start_time": datetime, "task": asyncio.Task}}
         self.radio_state: dict[int, dict] = {}
+        # Track when current song started (for resuming after TTS)
+        self.track_start_time: dict[int, datetime] = {}
 
     def get_queue(self, guild_id: int) -> deque:
         if guild_id not in self.queues:
@@ -273,18 +333,73 @@ class Music(commands.Cog):
         return await loop.run_in_executor(None, _extract)
 
     def play_next(self, guild_id: int, voice_client: discord.VoiceClient):
-        """Play the next track in the queue."""
+        """Play the next track in the queue (without TTS announcement)."""
         queue = self.get_queue(guild_id)
 
         if not queue:
             self.current_track.pop(guild_id, None)
-            # Clear now playing message when playback ends
+            cleanup.clear_now_playing(guild_id)
+            return
+
+        track = queue.popleft()
+        self.current_track[guild_id] = track
+        self._start_track(guild_id, voice_client, track)
+
+    async def play_next_async(self, guild_id: int, voice_client: discord.VoiceClient):
+        """Async wrapper for play_next that announces and plays the next track."""
+        if not voice_client or not voice_client.is_connected():
+            return
+
+        queue = self.get_queue(guild_id)
+        if not queue:
+            self.current_track.pop(guild_id, None)
             cleanup.clear_now_playing(guild_id)
             return
 
         track = queue.popleft()
         self.current_track[guild_id] = track
 
+        # Announce the track with TTS
+        await self._announce_track(guild_id, voice_client, track)
+
+    async def _announce_track(self, guild_id: int, voice_client: discord.VoiceClient, track: dict):
+        """Announce track title with TTS then start playing."""
+        title = track.get("title", "Unknown")
+        # Shorten long titles for TTS
+        if len(title) > 60:
+            title = title[:60]
+
+        try:
+            voice = random.choice(TTS_VOICES)
+            communicate = edge_tts.Communicate(f"Now playing: {title}", voice)
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                tmp_path = tmp.name
+            await communicate.save(tmp_path)
+        except Exception as e:
+            logger.error(f"TTS announcement failed: {e}")
+            # Fall back to just playing without announcement
+            self._start_track(guild_id, voice_client, track)
+            await self.send_now_playing(guild_id)
+            return
+
+        def after_announce(error):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            if error:
+                logger.error(f"Announcement error: {error}")
+            # Start the actual track after announcement
+            asyncio.run_coroutine_threadsafe(
+                self._start_track_async(guild_id, voice_client, track),
+                self.bot.loop,
+            )
+
+        voice_client.play(discord.FFmpegPCMAudio(tmp_path), after=after_announce)
+
+    def _start_track(self, guild_id: int, voice_client: discord.VoiceClient, track: dict):
+        """Start playing a track."""
+        self.track_start_time[guild_id] = datetime.now()
         source = discord.FFmpegPCMAudio(track["url"], **FFMPEG_OPTS)
 
         def after_playing(error):
@@ -297,10 +412,10 @@ class Music(commands.Cog):
 
         voice_client.play(source, after=after_playing)
 
-    async def play_next_async(self, guild_id: int, voice_client: discord.VoiceClient):
-        """Async wrapper for play_next that also sends the now playing message."""
+    async def _start_track_async(self, guild_id: int, voice_client: discord.VoiceClient, track: dict):
+        """Async wrapper to start track and send now playing message."""
         if voice_client and voice_client.is_connected():
-            self.play_next(guild_id, voice_client)
+            self._start_track(guild_id, voice_client, track)
             await self.send_now_playing(guild_id)
 
     async def send_now_playing(self, guild_id: int):
@@ -400,8 +515,7 @@ class Music(commands.Cog):
                             continue
 
                     if not voice_client.is_playing() and not voice_client.is_paused() and queue:
-                        self.play_next(guild_id, voice_client)
-                        await self.send_now_playing(guild_id)
+                        await self.play_next_async(guild_id, voice_client)
 
                 await asyncio.sleep(5)
 
@@ -611,8 +725,7 @@ class Music(commands.Cog):
                             continue
 
                     if not voice_client.is_playing() and not voice_client.is_paused() and queue:
-                        self.play_next(guild_id, voice_client)
-                        await self.send_now_playing(guild_id)
+                        await self.play_next_async(guild_id, voice_client)
 
                 await asyncio.sleep(5)
 
@@ -712,8 +825,7 @@ class Music(commands.Cog):
             await cleanup.send_temp(ctx, f"Added to queue: **{track['title']}** (position {len(queue)})", delay=MessageCleanup.QUEUE_ADD)
         else:
             queue.append(track)
-            self.play_next(guild_id, ctx.voice_client)
-            await self.send_now_playing(guild_id)
+            await self.play_next_async(guild_id, ctx.voice_client)
 
     @commands.command(name="pause")
     async def pause(self, ctx: commands.Context):
@@ -1234,6 +1346,84 @@ class Music(commands.Cog):
             lines.append(f"• **{name}** - {data['description']} {energy_icon}")
 
         await cleanup.send_status(ctx, "\n".join(lines))
+
+    # ==================== EASTER EGG ====================
+
+    @commands.command(name="wisper")
+    async def wisper(self, ctx: commands.Context, *, message: str):
+        """Whisper a secret message using text-to-speech."""
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+
+        if not ctx.voice_client:
+            if not ctx.author.voice:
+                return
+            await ctx.author.voice.channel.connect()
+
+        guild_id = ctx.guild.id
+        voice_client = ctx.voice_client
+
+        # Store current state for resuming
+        was_playing = voice_client.is_playing()
+        current = self.current_track.get(guild_id)
+        elapsed = 0
+        if was_playing and current and guild_id in self.track_start_time:
+            elapsed = (datetime.now() - self.track_start_time[guild_id]).total_seconds()
+
+        # Generate TTS
+        try:
+            voice = random.choice(TTS_VOICES)
+            communicate = edge_tts.Communicate(message, voice)
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                tmp_path = tmp.name
+            await communicate.save(tmp_path)
+        except Exception as e:
+            logger.error(f"TTS failed: {e}")
+            return
+
+        # Stop music to play TTS
+        if was_playing:
+            voice_client.stop()
+
+        def after_tts(error):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            if was_playing and current:
+                asyncio.run_coroutine_threadsafe(
+                    self._resume_track(guild_id, voice_client, current, elapsed),
+                    self.bot.loop,
+                )
+
+        voice_client.play(discord.FFmpegPCMAudio(tmp_path), after=after_tts)
+
+    async def _resume_track(self, guild_id: int, voice_client: discord.VoiceClient, track: dict, seek_seconds: float):
+        """Resume a track from a specific position."""
+        if not voice_client or not voice_client.is_connected():
+            return
+
+        self.current_track[guild_id] = track
+        self.track_start_time[guild_id] = datetime.now() - timedelta(seconds=seek_seconds)
+
+        # Use ffmpeg seek to resume from position
+        ffmpeg_opts = {
+            "before_options": f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {int(seek_seconds)}",
+            "options": "-vn -af loudnorm=I=-16:TP=-1.5:LRA=11",
+        }
+        source = discord.FFmpegPCMAudio(track["url"], **ffmpeg_opts)
+
+        def after_playing(error):
+            if error:
+                logger.error(f"Player error: {error}")
+            asyncio.run_coroutine_threadsafe(
+                self.play_next_async(guild_id, voice_client),
+                self.bot.loop,
+            )
+
+        voice_client.play(source, after=after_playing)
 
 
 async def setup(bot: commands.Bot):
