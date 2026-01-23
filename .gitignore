@@ -1,3 +1,4 @@
 .env
 env/
 FEATURE_ROADMAP.md
+__pycache__/
