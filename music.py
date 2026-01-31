@@ -222,9 +222,9 @@ class NowPlayingView(ui.View):
         await interaction.response.defer()
 
 # yt-dlp options
-# Prefer opus/webm at highest quality, fallback to best audio
+# Use default client fallback (android_vr, ios_downgraded) which works without PO tokens
 YDL_OPTS = {
-    "format": "bestaudio[acodec=opus]/bestaudio/best",
+    "format": "bestaudio/best",
     "quiet": True,
     "no_warnings": True,
     "extract_flat": False,
@@ -235,8 +235,9 @@ YDL_OPTS = {
 # I=-16: target integrated loudness of -16 LUFS (good for streaming)
 # TP=-1.5: true peak limit to prevent clipping
 # LRA=11: maintains natural dynamics
+# User-Agent header helps avoid 403 errors from YouTube
 FFMPEG_OPTS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "before_options": '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -headers "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"',
     "options": "-vn -af loudnorm=I=-16:TP=-1.5:LRA=11",
 }
 
