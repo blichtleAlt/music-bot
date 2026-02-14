@@ -1,7 +1,3 @@
-# Ralph Music Bot
-
-A Discord music bot with artist autoplay and live sports scores. Built with discord.py, yt-dlp, and FFmpeg.
-
 ## Features
 
 ### Music Playback
@@ -65,11 +61,6 @@ Save and load your favorite radio tunings.
   → loads saved station
 ```
 
-### Sports Scores
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `!cs [league]` | `!scores` | Live/final/upcoming scores for NFL, NBA, NHL |
-
 ## Setup
 
 1. Install dependencies:
@@ -88,14 +79,3 @@ Save and load your favorite radio tunings.
    ```bash
    python bot.py
    ```
-
-## Tech Stack
-- **discord.py** - Discord API wrapper
-- **yt-dlp** - YouTube audio extraction
-- **FFmpeg** - Audio streaming
-- **aiohttp** - ESPN API requests
-
-## Architecture
-- `bot.py` - Main bot setup, message cleanup system, cog loader
-- `music.py` - Music cog with playback, autoplay, radio mode, and station presets
-- `sports.py` - Sports cog with ESPN score fetching
